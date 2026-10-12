@@ -1,0 +1,6 @@
+private/
+backups/
+*-backup.sh
+*.optimizer-check.log
+__pycache__/
+.venv/
