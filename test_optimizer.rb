@@ -1,4 +1,5 @@
 require 'minitest/autorun'
+require 'tmpdir'
 require_relative 'optimizer'
 class OptimizerTest < Minitest::Test
   def setup
@@ -21,6 +22,29 @@ class OptimizerTest < Minitest::Test
   end
   def test_reject_group_collision; @p['groups'][0]['name']='Main'; assert_raises(RuntimeError){apply}; end
   def test_reject_invalid_domain; @p['groups'][0]['domains']=['https://sky.test/path']; assert_raises(RuntimeError){apply}; end
+  def test_reject_empty_or_non_array_domains
+    [[], 'sky.test', nil].each do |value|
+      @p['groups'][0]['domains']=value
+      assert_raises(RuntimeError){apply}
+    end
+  end
+  def test_file_runner_accepts_plain_yaml_anchors
+    Dir.mktmpdir do |dir|
+      config_path=File.join(dir,'config.yaml');profile_path=File.join(dir,'profile.yaml')
+      shared=['192.0.2.53'];@v['dns']['nameserver']=shared;@v['dns']['fallback']=shared
+      @p['dns_enabled']=false
+      File.write(config_path,YAML.dump(@v));File.write(profile_path,YAML.dump(@p))
+      previous=ENV['OCOPT_TEST'];ENV['OCOPT_TEST']='1'
+      begin
+        OpenClashOptimizer.run(config_path,profile_path)
+        result=YAML.safe_load(File.read(config_path),aliases:true)
+        assert_equal shared,result['dns']['nameserver']
+        assert_equal 'DOMAIN-SUFFIX,sky.test,OC · PT',result['rules'].first
+      ensure
+        ENV['OCOPT_TEST']=previous
+      end
+    end
+  end
   def test_missing_proxy; @p['proxy_group']='Nope'; assert_raises(RuntimeError){apply}; end
   def test_auto_without_tagss; @p['proxy_group']='AUTO'; assert_equal 'Main',apply['proxy-groups'].last['proxies'][1]; end
   def test_provider_only
@@ -31,5 +55,25 @@ class OptimizerTest < Minitest::Test
   end
   def test_disable_dns_restores_original
     r=apply; @p['dns_enabled']=false; @p['dns_exceptions']={}; assert_equal @v['dns'],apply(r)['dns']
+  end
+  def test_scoped_preserves_default_and_fallback
+    @p['dns_scope']='scoped';@v['dns']['enable']=true;@v['dns']['nameserver']=['192.0.2.1'];@v['dns']['fallback']=['192.0.2.2']
+    r=apply
+    assert_equal ['192.0.2.1'],r['dns']['nameserver'];assert_equal ['192.0.2.2'],r['dns']['fallback']
+    assert_equal r,apply(r)
+  end
+  def test_missing_dns_not_created_when_disabled
+    @v.delete('dns');@p['dns_enabled']=false
+    refute apply.key?('dns')
+  end
+  def test_scoped_missing_dns_restores_absence
+    @v.delete('dns');@p['dns_scope']='scoped'
+    r=apply;assert_equal true,r['dns']['enable'];@p['dns_enabled']=false
+    refute apply(r).key?('dns')
+  end
+  def test_scoped_direct_dns_follows_policy_and_restores
+    @p['dns_scope']='scoped';@v['dns']['direct-nameserver']=['system'];@v['dns']['direct-nameserver-follow-policy']=false
+    r=apply;assert_equal true,r['dns']['direct-nameserver-follow-policy'];@p['dns_enabled']=false
+    assert_equal @v['dns'],apply(r)['dns']
   end
 end

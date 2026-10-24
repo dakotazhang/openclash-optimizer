@@ -1,14 +1,15 @@
 {
   "version": 1,
   "proxy_group": "AUTO",
-  "dns_enabled": true,
+  "dns_enabled": false,
+  "dns_scope": "scoped",
   "groups": [
-    {"name":"OC · U2网页","default":"PROXY","match":"exact","dns":"foreign","domains":["u2.dmhy.org"]},
+    {"name":"OC · U2网页","default":"DIRECT","match":"exact","dns":"inherit","domains":["u2.dmhy.org"]},
     {"name":"OC · PT站点","default":"DIRECT","match":"suffix","dns":"domestic","domains":["m-team.cc","m-team.io","hdsky.me","chdbits.co","totheglory.im","ourbits.club"]},
     {"name":"OC · 哔哩哔哩","default":"DIRECT","match":"suffix","dns":"domestic","domains":["bilibili.com","bilivideo.com","hdslb.com","b23.tv"]},
     {"name":"OC · 巴哈姆特","default":"PROXY","match":"suffix","dns":"foreign","domains":["gamer.com.tw","bahamut.com.tw"]},
     {"name":"OC · HBO","default":"PROXY","match":"suffix","dns":"foreign","domains":["hbo.com","hbomax.com","max.com"]}
   ],
   "direct_domains": ["tracker.m-team.cc"],
-  "dns_exceptions": {"chdbits.co":"foreign"}
+  "dns_exceptions": {}
 }

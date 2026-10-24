@@ -5,7 +5,7 @@ module OpenClashOptimizer
   MARKER = 'x-openclash-optimizer'.freeze
   def self.domain(value)
     s = value.to_s.strip.downcase
-    raise '请填写纯域名，不能含路径、端口或通配符' unless s.match?(/\A[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\z/) && s.include?('.') && !s.include?('..') && s.split('.').all? { |x| x.size <= 63 && !x.start_with?('-') && !x.end_with?('-') }
+    raise '请填写纯域名，不能含路径、端口或通配符' unless s.size <= 253 && s.match?(/\A[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\z/) && s.include?('.') && !s.include?('..') && s.split('.').all? { |x| x.size <= 63 && !x.start_with?('-') && !x.end_with?('-') }
     s
   end
 
@@ -15,29 +15,36 @@ module OpenClashOptimizer
     raise '至少添加一个策略组' unless specs.is_a?(Array) && !specs.empty?
     names = specs.map { |s| s.fetch('name') }
     raise '策略组名称不能重复' unless names.uniq.size == names.size
-    names.each { |n| raise '组名不能为空或含逗号、换行、#' unless n.is_a?(String) && !n.strip.empty? && !n.match?(/[,\r\n#]/) && !%w[DIRECT REJECT GLOBAL].include?(n) }
+    names.each { |n| raise '组名不能为空或含逗号、换行、#、&' unless n.is_a?(String) && !n.strip.empty? && !n.match?(/[,\r\n#&]/) && !%w[DIRECT REJECT GLOBAL].include?(n) }
     old = v.delete(MARKER) || {}
     raise '未知管理标记' unless old.empty? || old['version'] == 1
     original_groups = v['proxy-groups'] ||= []
     original_groups.reject! { |g| Array(old['groups']).include?(g['name']) }
     raise '与现有组同名，请改名，避免覆盖现有设置' if original_groups.any? { |g| names.include?(g['name']) }
     v['rules'] = Array(v['rules']).reject { |r| Array(old['rules']).include?(r) }
-    dns = v['dns'] ||= {}
+    dns = v['dns'] || {}
     (old['dns_previous'] || {}).each { |k, previous| previous.nil? ? dns.delete(k) : dns[k] = previous }
-    policy = dns['nameserver-policy'] ||= {}
+    policy = dns['nameserver-policy'] || {}
     (old['policy_previous'] || {}).each { |k, previous| previous.nil? ? policy.delete(k) : policy[k] = previous }
+    dns.delete('nameserver-policy') if old['policy_absent'] && policy.empty?
+    v.delete('dns') if old['dns_absent'] && dns.empty?
+    dns_absent = !v.key?('dns')
+    policy_absent = !dns.key?('nameserver-policy')
     base_name = profile.fetch('proxy_group', 'AUTO')
     base = if base_name == 'AUTO'
-             original_groups.find { |g| g['name'].to_s.include?('TAGSS') } || original_groups.find { |g| g['type'] == 'select' }
+             original_groups.find { |g| g['type'] == 'select' && g['name'].to_s.include?('TAGSS') } || original_groups.find { |g| g['type'] == 'select' }
            else
              original_groups.find { |g| g['name'] == base_name }
            end
     raise '找不到主代理组，请在工具中填写现有组名' unless base
     nodes = Array(v['proxies']).map { |p| p['name'] }.compact
+    raise '分组与原节点同名' if nodes.any? { |n| names.include?(n) }
     raise '主代理组无可用出口' if Array(base['proxies']).empty? && Array(base['use']).empty?
     domestic = ['https://dns.alidns.com/dns-query', 'https://doh.pub/dns-query']
     foreign = ['https://1.1.1.1/dns-query#' + base['name'], 'https://8.8.8.8/dns-query#' + base['name']]
-    generated = []; previous = {}; occupied = {}
+    generated = []; previous = {}; occupied = {}; used_foreign = false
+    scope = profile.fetch('dns_scope', 'global')
+    raise '未知DNS范围' unless %w[scoped global].include?(scope)
     specs.each do |spec|
       default = spec.fetch('default', 'DIRECT')
       raise '默认出口只能选 DIRECT 或 PROXY' unless %w[DIRECT PROXY].include?(default)
@@ -49,20 +56,23 @@ module OpenClashOptimizer
       raise '匹配方式应为 exact 或 suffix' unless %w[exact suffix].include?(match)
       resolver = spec.fetch('dns', 'inherit')
       raise 'DNS选项无效' unless %w[inherit domestic foreign].include?(resolver)
-      Array(spec.fetch('domains')).each do |value|
+      domains = spec.fetch('domains')
+      raise '每组至少填写一个域名，domains应为数组' unless domains.is_a?(Array) && !domains.empty?
+      domains.each do |value|
         host = domain(value); key = [match, host]
         raise "域名重复分配：#{host}" if occupied[key]
         occupied[key] = true
         generated << "#{match == 'exact' ? 'DOMAIN' : 'DOMAIN-SUFFIX'},#{host},#{spec['name']}"
         next if resolver == 'inherit' || !profile.fetch('dns_enabled', true)
         pk = match == 'exact' ? host : '+.' + host
-        previous[pk] = policy[pk]
+        previous[pk] = policy[pk] unless previous.key?(pk)
         policy[pk] = resolver == 'domestic' ? domestic : foreign
+        used_foreign ||= resolver == 'foreign'
       end
     end
     Array(profile['direct_domains']).each { |d| generated.unshift("DOMAIN,#{domain(d)},DIRECT") }
     dns_previous = {}
-    if profile.fetch('dns_enabled', true)
+    if profile.fetch('dns_enabled', true) && scope == 'global'
       %w[nameserver fallback default-nameserver proxy-server-nameserver respect-rules fallback-filter].each { |k| dns_previous[k] = dns[k] }
       dns['nameserver'] = domestic
       dns['fallback'] = foreign
@@ -75,16 +85,39 @@ module OpenClashOptimizer
       raise 'DNS例外只能选 domestic 或 foreign' unless %w[domestic foreign].include?(kind)
       pk = '+.' + domain(host)
       previous[pk] = policy[pk] unless previous.key?(pk)
-      policy[pk] = kind == 'foreign' ? foreign : domestic if profile.fetch('dns_enabled', true)
+      if profile.fetch('dns_enabled', true)
+        policy[pk] = kind == 'foreign' ? foreign : domestic
+        used_foreign ||= kind == 'foreign'
+      else
+        previous.delete(pk)
+      end
     end
+    if profile.fetch('dns_enabled', true) && scope == 'scoped' && !previous.empty?
+      set_dns = lambda do |key, value|
+        dns_previous[key] = dns[key] unless dns_previous.key?(key)
+        dns[key] = value
+      end
+      set_dns.call('enable', true) unless dns['enable'] == true
+      set_dns.call('nameserver', ['223.5.5.5', '119.29.29.29']) if Array(dns['nameserver']).empty?
+      set_dns.call('default-nameserver', ['223.5.5.5', '119.29.29.29']) if Array(dns['default-nameserver']).empty?
+      set_dns.call('proxy-server-nameserver', ['223.5.5.5', '119.29.29.29']) if used_foreign && Array(dns['proxy-server-nameserver']).empty?
+      if !Array(dns['direct-nameserver']).empty? && dns['direct-nameserver-follow-policy'] != true
+        set_dns.call('direct-nameserver-follow-policy', true)
+      end
+    end
+    if used_foreign && base['name'].match?(/[#&\r\n]/)
+      raise '主代理组含DNS参数分隔符，请使用不含#或&的组名'
+    end
+    dns['nameserver-policy'] = policy unless previous.empty?
+    v['dns'] = dns unless dns_absent && dns.empty?
     v['rules'] = generated.uniq + v['rules']
-    v[MARKER] = {'version'=>1, 'groups'=>names, 'rules'=>generated.uniq, 'policy_previous'=>previous, 'dns_previous'=>dns_previous}
+    v[MARKER] = {'version'=>1, 'groups'=>names, 'rules'=>generated.uniq, 'policy_previous'=>previous, 'dns_previous'=>dns_previous, 'dns_absent'=>dns_absent, 'policy_absent'=>policy_absent}
     v
   end
 
   def self.run(path, profile_path)
-    profile = YAML.load_file(profile_path)
-    v = apply(YAML.load_file(path), profile)
+    profile = YAML.safe_load(File.read(profile_path), aliases: true)
+    v = apply(YAML.safe_load(File.read(path), aliases: true), profile)
     tmp = path + '.optimizer.tmp'
     File.open(tmp, 'w', 0600) { |f| YAML.dump(v, f) }
     core = '/etc/openclash/core/clash_meta'
